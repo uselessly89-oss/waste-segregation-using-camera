@@ -32,6 +32,39 @@ def test_annotate_frame_importable():
     assert callable(annotate_frame)
 
 
+def test_annotate_frame_returns_detections():
+    """Verify annotate_frame returns (image, counts, detections) tuple."""
+    from utils import annotate_frame
+
+    class _Box:
+        def __init__(self):
+            # xyxy box at (10,10) to (50,50)
+            self.xyxy = type("x", (), {"cpu": lambda s: type("n", (), {"numpy": lambda s2: np.array([[10.0, 10.0, 50.0, 50.0]])})()})()
+            self.cls = [type("c", (), {"item": lambda s: 0})()]
+            self.conf = [type("c", (), {"item": lambda s: 0.85})()]
+
+    class _Result:
+        boxes = _Box()
+
+    class _Model:
+        names = {0: "plastic"}
+        def predict(self, *a, **kw):
+            return [_Result()]
+
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    annotated, counts, detections = annotate_frame(_Model(), frame, 0.45, 0.50)
+    assert isinstance(annotated, np.ndarray)
+    assert annotated.shape == (100, 100, 3)
+    assert counts == {"plastic": 1}
+    assert len(detections) == 1
+    d = detections[0]
+    assert d["class"] == "plastic"
+    assert d["confidence"] == 0.85
+    assert d["x1"] == 10.0
+    assert d["y2"] == 50.0
+    assert "cx" in d and "cy" in d
+
+
 def test_make_test_video():
     """Verify we can create and read a synthetic video."""
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
