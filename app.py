@@ -81,11 +81,8 @@ def annotate(image, conf=0.45, iou=0.50, cluster_mode=True):
     return annotated, message, csv_path
 
 
-def _build_heatmap(detections, width, height, class_counts):
+def _build_heatmap(detections, width, height, class_counts, class_filter=None):
     """Build a detection heatmap overlay from a list of detection dicts.
-
-    Uses Gaussian blurring of detection center points to create a smooth
-    density map, then applies a colormap and overlays class labels.
 
     Parameters
     ----------
@@ -95,22 +92,29 @@ def _build_heatmap(detections, width, height, class_counts):
         Frame dimensions.
     class_counts : dict
         Per-class detection counts for the legend.
+    class_filter : str or None
+        If set, only include detections matching this class name.
 
     Returns
     -------
     numpy.ndarray
-        RGB heatmap image (same dimensions as the video frame).
+        RGB heatmap image.
     """
+    # Filter by class if requested
+    filtered = detections
+    if class_filter:
+        filtered = [d for d in detections if d["class"] == class_filter]
+
     # Accumulate detection points on a blank canvas
     canvas = np.zeros((height, width), dtype=np.float32)
-    for det in detections:
+    for det in filtered:
         cx = int(det["cx"])
         cy = int(det["cy"])
         if 0 <= cx < width and 0 <= cy < height:
             canvas[cy, cx] += 1.0
 
     # Smooth with a large Gaussian to create density blobs
-    ksize = max(31, min(width, height) // 8) | 1  # ensure odd
+    ksize = max(31, min(width, height) // 8) | 1
     heatmap = cv2.GaussianBlur(canvas, (ksize, ksize), 0)
 
     # Normalize to 0-255
@@ -128,32 +132,165 @@ def _build_heatmap(detections, width, height, class_counts):
     base = np.full((height, width, 3), 40, dtype=np.uint8)
     mask = heatmap > 0
     blended = base.copy()
-    blended[mask] = cv2.addWeighted(
-        base, 0.4, heatmap_rgb, 0.6, 0,
-    )[mask]
+    blended[mask] = cv2.addWeighted(base, 0.4, heatmap_rgb, 0.6, 0)[mask]
+
+    # Build title
+    det_count = len(filtered)
+    if class_filter:
+        title = f"{class_filter} heatmap ({det_count} detections)"
+    else:
+        title = f"All classes heatmap ({det_count} detections)"
 
     # Draw legend
     y_offset = 25
     cv2.putText(
-        blended, f"Detections heatmap ({sum(class_counts.values())} total)",
+        blended, title,
         (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2,
     )
     y_offset += 30
-    # Per-class legend with colored dots
     legend_colors = [
         (0, 255, 0), (255, 255, 0), (255, 128, 0),
         (0, 200, 255), (255, 0, 255), (128, 255, 0),
     ]
-    for i, (cls, cnt) in enumerate(sorted(class_counts.items())):
-        color = legend_colors[i % len(legend_colors)]
-        cv2.circle(blended, (20, y_offset - 5), 6, color, -1)
+    # For per-class heatmaps, show just that class; for all, show legend
+    if class_filter:
+        cv2.circle(blended, (20, y_offset - 5), 6, (255, 255, 255), -1)
         cv2.putText(
-            blended, f"{cls}: {cnt}", (35, y_offset),
+            blended, f"{class_filter}: {det_count}", (35, y_offset),
             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
         )
-        y_offset += 22
+    else:
+        for i, (cls, cnt) in enumerate(sorted(class_counts.items())):
+            color = legend_colors[i % len(legend_colors)]
+            cv2.circle(blended, (20, y_offset - 5), 6, color, -1)
+            cv2.putText(
+                blended, f"{cls}: {cnt}", (35, y_offset),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
+            )
+            y_offset += 22
 
     return blended
+
+
+def _build_timeline(detections, total_duration_s, class_counts):
+    """Build a per-second detection timeline chart.
+
+    Returns an RGB numpy image showing a bar chart of detections per second,
+    with stacked colors for each waste class.
+
+    Parameters
+    ----------
+    detections : list[dict]
+        Detection dicts with 'timestamp_s' and 'class' keys.
+    total_duration_s : float
+        Video duration in seconds.
+    class_counts : dict
+        Per-class counts (used for legend colors).
+
+    Returns
+    -------
+    numpy.ndarray
+        RGB chart image.
+    """
+    import math
+
+    # Bin detections by second
+    n_bins = max(1, int(math.ceil(total_duration_s)))
+    bins = np.zeros((n_bins, len(class_counts)), dtype=np.int32)
+    cls_names = sorted(class_counts.keys())
+    cls_idx = {name: i for i, name in enumerate(cls_names)}
+
+    for det in detections:
+        sec = min(int(det["timestamp_s"]), n_bins - 1)
+        name = det["class"]
+        if name in cls_idx:
+            bins[sec, cls_idx[name]] += 1
+
+    # Chart dimensions
+    chart_w, chart_h = 800, 300
+    margin_left, margin_bottom, margin_top, margin_right = 70, 40, 40, 20
+    plot_w = chart_w - margin_left - margin_right
+    plot_h = chart_h - margin_top - margin_bottom
+
+    # Canvas
+    img = np.full((chart_h, chart_w, 3), 255, dtype=np.uint8)
+
+    # Find max value for scaling
+    row_totals = bins.sum(axis=1)
+    y_max = max(int(row_totals.max()), 1)
+    # Round up to nice number
+    y_max = int(math.ceil(y_max / max(1, int(y_max ** 0.5))) * max(1, int(y_max ** 0.5)))
+    if y_max < 5:
+        y_max = 5
+
+    # Class colors (BGR for OpenCV)
+    cls_colors = [
+        (0, 200, 0),    # green
+        (0, 220, 255),  # orange
+        (0, 128, 255),  # blue-ish
+        (255, 128, 0),  # cyan-ish
+        (128, 0, 255),  # magenta
+        (0, 255, 200),  # teal
+    ]
+
+    # Draw axes
+    ax_left = margin_left
+    ax_right = chart_w - margin_right
+    ax_top = margin_top
+    ax_bottom = chart_h - margin_bottom
+    cv2.line(img, (ax_left, ax_top), (ax_left, ax_bottom), (80, 80, 80), 2)
+    cv2.line(img, (ax_left, ax_bottom), (ax_right, ax_bottom), (80, 80, 80), 2)
+
+    # Y-axis grid lines and labels
+    n_grid = min(y_max, 5)
+    for i in range(n_grid + 1):
+        y_val = int(y_max * i / n_grid)
+        y_px = ax_bottom - int(plot_h * i / n_grid)
+        cv2.line(img, (ax_left, y_px), (ax_right, y_px), (200, 200, 200), 1)
+        cv2.putText(img, str(y_val), (5, y_px + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (80, 80, 80), 1)
+
+    # Draw stacked bars
+    bar_w = max(1, plot_w // n_bins - 1)
+    for sec in range(n_bins):
+        x_left = ax_left + int(plot_w * sec / n_bins)
+        cumulative = 0
+        for ci, cls_name in enumerate(cls_names):
+            val = bins[sec, ci]
+            if val == 0:
+                continue
+            h = int(plot_h * val / y_max)
+            y_top = ax_bottom - cumulative - h
+            y_bot = ax_bottom - cumulative
+            color = cls_colors[ci % len(cls_colors)]
+            cv2.rectangle(img, (x_left, y_top), (x_left + bar_w, y_bot), color, -1)
+            cumulative += h
+
+        # X-axis label (every N seconds)
+        if n_bins <= 30 or sec % max(1, n_bins // 10) == 0:
+            cv2.putText(
+                img, f"{sec}s", (x_left, ax_bottom + 15),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (80, 80, 80), 1,
+            )
+
+    # Title
+    cv2.putText(
+        img, "Detections per second", (margin_left, 25),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (30, 30, 30), 1,
+    )
+
+    # Legend
+    legend_x = chart_w - 150
+    legend_y = 25
+    for ci, cls_name in enumerate(cls_names):
+        color = cls_colors[ci % len(cls_colors)]
+        cv2.rectangle(img, (legend_x, legend_y - 8), (legend_x + 10, legend_y + 2), color, -1)
+        cv2.putText(
+            img, cls_name, (legend_x + 15, legend_y),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (50, 50, 50), 1,
+        )
+        legend_y += 15
+
+    return img
 
 
 def analyze_video(video_path, conf=0.45, iou=0.50, frame_skip=2, progress=gr.Progress(track_tqdm=True)):
@@ -234,10 +371,28 @@ def analyze_video(video_path, conf=0.45, iou=0.50, frame_skip=2, progress=gr.Pro
             writer_csv = csv.DictWriter(f, fieldnames=csv_fields)
             writer_csv.writeheader()
 
-    # --- Generate heatmap ---
-    heatmap_path = str(Path(video_path).parent / "detection_heatmap.png")
+    # --- Generate heatmaps ---
+    parent = Path(video_path).parent
+    heatmap_path = str(parent / "detection_heatmap.png")
     heatmap_img = _build_heatmap(all_detections, width, height, global_counts)
     cv2.imwrite(heatmap_path, cv2.cvtColor(heatmap_img, cv2.COLOR_RGB2BGR))
+
+    # Per-class heatmaps
+    per_class_heatmaps = []  # list of (class_name, np.ndarray)
+    for cls_name in sorted(global_counts.keys()):
+        cls_img = _build_heatmap(
+            all_detections, width, height, global_counts, class_filter=cls_name,
+        )
+        per_class_heatmaps.append((cls_name, cls_img))
+        # Also save to disk
+        cls_path = str(parent / f"heatmap_{cls_name}.png")
+        cv2.imwrite(cls_path, cv2.cvtColor(cls_img, cv2.COLOR_RGB2BGR))
+
+    # --- Generate timeline chart ---
+    total_duration = total_frames / fps
+    timeline_img = _build_timeline(all_detections, total_duration, global_counts)
+    timeline_path = str(parent / "detection_timeline.png")
+    cv2.imwrite(timeline_path, cv2.cvtColor(timeline_img, cv2.COLOR_RGB2BGR))
 
     # Build summary
     total_det = sum(global_counts.values())
@@ -255,9 +410,12 @@ def analyze_video(video_path, conf=0.45, iou=0.50, frame_skip=2, progress=gr.Pro
         lines.append("\nNo objects detected in any analyzed frame.")
     lines.append(f"\nAnnotated video saved to: {out_path}")
     lines.append(f"Detections CSV saved to: {csv_path}")
-    lines.append(f"Heatmap saved to: {heatmap_path}")
+    lines.append(f"Overall heatmap: {heatmap_path}")
+    lines.append(f"Timeline chart: {timeline_path}")
+    for cls_name, _ in per_class_heatmaps:
+        lines.append(f"  {cls_name} heatmap: heatmap_{cls_name}.png")
 
-    return out_path, "\n".join(lines), csv_path, heatmap_path
+    return out_path, "\n".join(lines), csv_path, heatmap_img, per_class_heatmaps, timeline_img
 
 
 CUSTOM_CSS = """
@@ -450,7 +608,18 @@ def run():
                         )
                         heatmap_output = gr.Image(
                             type="numpy",
-                            label="Detection heatmap",
+                            label="Overall detection heatmap",
+                        )
+                        gr.Markdown("### \ud83d\udd38 Per-class heatmaps")
+                        per_class_gallery = gr.Gallery(
+                            label="Heatmaps per waste type",
+                            columns=4,
+                            height="auto",
+                        )
+                        gr.Markdown("### \ud83d\udcc8 Detection timeline")
+                        timeline_output = gr.Image(
+                            type="numpy",
+                            label="Detections per second",
                         )
 
         # -- Footer --
@@ -467,24 +636,19 @@ def run():
             outputs=[output_image, decision_box, photo_csv_download],
         )
         def _run_video_analysis(video_path, conf, iou, frame_skip):
-            """Wrapper that returns (video, status, summary, csv, heatmap) for the UI."""
-            out_path, summary, csv_path, heatmap_path = analyze_video(
+            """Wrapper that returns all video analysis outputs for the UI."""
+            out_path, summary, csv_path, heatmap_img, per_class, timeline_img = analyze_video(
                 video_path, conf, iou, frame_skip,
             )
             lines = summary.split("\n")
             status = lines[0] if lines else ""
-            # Load heatmap as numpy array for display
-            heatmap_img = None
-            if heatmap_path and Path(heatmap_path).exists():
-                heatmap_img = cv2.cvtColor(
-                    cv2.imread(heatmap_path), cv2.COLOR_BGR2RGB,
-                )
-            return out_path, status, summary, csv_path, heatmap_img
+            gallery_items = [(img, name) for name, img in per_class]
+            return out_path, status, summary, csv_path, heatmap_img, gallery_items, timeline_img
 
         video_btn.click(
             fn=_run_video_analysis,
             inputs=[video_input, v_conf, v_iou, frame_skip_slider],
-            outputs=[video_output, video_status, video_summary, csv_download, heatmap_output],
+            outputs=[video_output, video_status, video_summary, csv_download, heatmap_output, per_class_gallery, timeline_output],
         )
 
     return demo
