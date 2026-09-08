@@ -1,0 +1,14 @@
+[
+  "tests/test_detect.py::test_source_value_camera_index",
+  "tests/test_detect.py::test_source_value_file_path",
+  "tests/test_quality.py::test_blurry_frame_rejected",
+  "tests/test_quality.py::test_bright_frame_rejected",
+  "tests/test_quality.py::test_dark_frame_rejected",
+  "tests/test_quality.py::test_good_frame",
+  "tests/test_video.py::test_analyze_video_no_input",
+  "tests/test_video.py::test_annotate_frame_helper",
+  "tests/test_video.py::test_annotate_frame_importable",
+  "tests/test_video.py::test_annotate_frame_returns_detections",
+  "tests/test_video.py::test_make_test_video",
+  "tests/test_video.py::test_make_test_video_frame_dimensions"
+]

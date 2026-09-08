@@ -1,0 +1,3 @@
+{
+  "tests/test_video.py::test_annotate_frame_helper": true
+}
