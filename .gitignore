@@ -1,2 +1,14 @@
-# Created by pytest automatically.
-*
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+runs/
+dataset/images/
+dataset/labels/
+*.pt
+*.onnx
+*.engine
+*.mp4
+*.avi
+*.mov
